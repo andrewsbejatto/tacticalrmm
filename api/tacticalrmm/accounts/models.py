@@ -126,6 +126,8 @@ class Role(BaseAuditModel):
     can_use_registry = models.BooleanField(default=False)
     can_use_terminal = models.BooleanField(default=False)
     can_use_file_browser = models.BooleanField(default=False)
+    # remote support of computers without the agent (quick support executable)
+    can_use_quick_support = models.BooleanField(default=False)
 
     # core
     can_list_notes = models.BooleanField(default=False)

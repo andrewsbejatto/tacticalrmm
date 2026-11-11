@@ -294,6 +294,7 @@ INSTALLED_APPS = [
     "logs",
     "scripts",
     "alerts",
+    "quicksupport",
     "ee.sso",
 ]
 

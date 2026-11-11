@@ -42,6 +42,7 @@ from tacticalrmm.constants import (
 from tacticalrmm.helpers import get_certs, notify_error
 from tacticalrmm.logger import logger
 from tacticalrmm.permissions import (
+    _has_perm,
     _has_perm_on_agent,
     _has_partial_perm_on_client,
     _has_perm_on_site,
@@ -161,6 +162,7 @@ def dashboard_info(request):
             "run_cmd_placeholder_text": runcmd_placeholder_text(),
             "server_scripts_enabled": core_settings.server_scripts_enabled,
             "web_terminal_enabled": core_settings.web_terminal_enabled,
+            "can_use_quick_support": bool(_has_perm(request, "can_use_quick_support")),
             "block_local_user_logon": core_settings.block_local_user_logon,
             "sso_enabled": core_settings.sso_enabled,
         }
