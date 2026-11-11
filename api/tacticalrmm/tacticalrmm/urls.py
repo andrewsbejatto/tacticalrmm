@@ -40,6 +40,8 @@ urlpatterns = [
     path("scripts/", include("scripts.urls")),
     path("alerts/", include("alerts.urls")),
     path("accounts/", include("accounts.urls")),
+    path("quicksupport/", include("quicksupport.urls")),
+    path("remoteaccess/", include("remoteaccess.urls")),
 ]
 
 if not getattr(settings, "DEMO", False):

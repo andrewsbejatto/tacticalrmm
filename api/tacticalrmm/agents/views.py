@@ -417,6 +417,10 @@ class GetUpdateDeleteAgent(APIView):
         elif agent.plat == AgentPlat.DARWIN:
             code = Path(settings.MAC_UNINSTALL).read_text()
 
+        # TRMM Desktop (remote access) goes away with the agent
+        from remoteaccess.hooks import before_agent_uninstall
+
+        before_agent_uninstall(agent)
         asyncio.run(agent.nats_cmd({"func": "uninstall", "code": code}, wait=False))
         name = agent.hostname
         mesh_id = agent.mesh_node_id
@@ -798,6 +802,10 @@ def install_agent(request):
     client_id = request.data["client"]
     site_id = request.data["site"]
     version = settings.LATEST_AGENT_VER
+    from tacticalrmm.utils import install_power_flag
+
+    # servers never sleep/hibernate (see install_power_flag)
+    power = install_power_flag(request.data["agenttype"], request.data.get("power", 0))
     goarch = request.data["goarch"]
     plat = request.data["plat"]
 
@@ -847,7 +855,7 @@ def install_agent(request):
             agent_type=request.data["agenttype"],
             rdp=request.data["rdp"],
             ping=request.data["ping"],
-            power=request.data["power"],
+            power=power,
             goarch=goarch,
             token=token,
             api=request.data["api"],
@@ -887,7 +895,7 @@ def install_agent(request):
                 cmd.append("--rdp")
             if int(request.data["ping"]):
                 cmd.append("--ping")
-            if int(request.data["power"]):
+            if power:
                 cmd.append("--power")
 
             if insecure:
@@ -917,7 +925,7 @@ def install_agent(request):
             "sitechange": str(site_id),
             "apichange": request.data["api"],
             "atypechange": request.data["agenttype"],
-            "powerchange": str(request.data["power"]),
+            "powerchange": str(power),
             "rdpchange": str(request.data["rdp"]),
             "pingchange": str(request.data["ping"]),
             "downloadchange": download_url,

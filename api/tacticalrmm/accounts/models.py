@@ -15,6 +15,15 @@ from tacticalrmm.constants import (
 )
 
 
+# UI languages available in the web dashboard (see web src/i18n/index.ts).
+# An empty value means "automatic" (browser language).
+LANGUAGE_CHOICES = [
+    ("", "Auto"),
+    ("en-US", "English"),
+    ("pt-BR", "Português (Brasil)"),
+]
+
+
 class User(AbstractUser, BaseAuditModel):
     is_active = models.BooleanField(default=True)
     block_dashboard_login = models.BooleanField(default=False)
@@ -46,6 +55,9 @@ class User(AbstractUser, BaseAuditModel):
     dash_warning_color = models.CharField(max_length=255, default="warning")
     clear_search_when_switching = models.BooleanField(default=True)
     date_format = models.CharField(max_length=30, blank=True, null=True)
+    language = models.CharField(
+        max_length=10, blank=True, default="", choices=LANGUAGE_CHOICES
+    )
     is_installer_user = models.BooleanField(default=False)
     last_login_ip = models.GenericIPAddressField(default=None, blank=True, null=True)
 
@@ -126,6 +138,10 @@ class Role(BaseAuditModel):
     can_use_registry = models.BooleanField(default=False)
     can_use_terminal = models.BooleanField(default=False)
     can_use_file_browser = models.BooleanField(default=False)
+    # remote access to computers without the agent (quick support executable)
+    can_use_quick_support = models.BooleanField(default=False)
+    # remote desktop with the TRMM Desktop app (RustDesk engine)
+    can_use_remote_access = models.BooleanField(default=False)
 
     # core
     can_list_notes = models.BooleanField(default=False)
