@@ -236,6 +236,11 @@ def _connect_response(request, device: RemoteAccessDevice):
     if not password:
         return notify_error("The stored password can't be read, change the password")
     cfg = RemoteAccessConfig.load()
+    from recordings.models import RemoteConnectLog
+
+    RemoteConnectLog.objects.create(
+        device=device, user=request.user, username=request.user.username
+    )
     _audit(
         request,
         f"{request.user.username} started a remote access session "
@@ -467,7 +472,19 @@ class Enroll(APIView):
                 + "."
             ),
         )
-        return Response({"device": device.pk, "linked_agent": bool(device.agent_id)})
+        from recordings.views import host_record_config
+
+        record = host_record_config(device, api_url(request)) or {}
+        return Response(
+            {
+                "device": device.pk,
+                "linked_agent": bool(device.agent_id),
+                # session recording (empty = off): the install script passes
+                # them to `trmmdesktop --record-config`
+                "record_url": record.get("url", ""),
+                "record_token": record.get("token", ""),
+            }
+        )
 
 
 # ---------------------------------------------------------------------------

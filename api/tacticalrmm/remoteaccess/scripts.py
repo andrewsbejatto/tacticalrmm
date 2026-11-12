@@ -66,6 +66,14 @@ try {
         if ($out -match 'Done') { $done = $true }
     }
     if (-not $done) { throw "unable to set the password: $out" }
+    # session recording (recordings app): upload url + token of this device,
+    # empty file = off. Older builds ignore the option.
+    if ('__RECORD_SET__' -eq '1') {
+        $recFile = Join-Path $work 'rec.json'
+        Set-Content -Path $recFile -Value '__RECORD__' -NoNewline -Encoding ASCII
+        & $exe --record-config $recFile | Out-Null
+        Remove-Item $recFile -Force -ErrorAction SilentlyContinue
+    }
     $id = ''
     for ($i = 0; ($i -lt 10) -and -not $id; $i++) {
         $id = (& $exe --get-id | Out-String).Trim()
@@ -117,6 +125,14 @@ for i in $(seq 1 15); do
     [ "$OK" = 1 ] && break
 done
 [ "$OK" = 1 ] || err 'unable to set the password'
+# session recording (recordings app): upload url + token, empty file = off
+if [ '__RECORD_SET__' = '1' ]; then
+    RECF=$(mktemp)
+    chmod 600 "$RECF"
+    printf '%s' '__RECORD__' > "$RECF"
+    "$BIN" --record-config "$RECF" >/dev/null 2>&1
+    rm -f "$RECF"
+fi
 ID=$("$BIN" --get-id 2>/dev/null | tr -d '[:space:]')
 [ -n "$ID" ] || err 'unable to read the id'
 echo "TRMMRA-ID:$ID"
@@ -126,6 +142,8 @@ echo 'TRMMRA-OK:ok'
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(:[0-9]{1,5})?$")
 _KEY_RE = re.compile(r"^[A-Za-z0-9+/=]*$")
+# {"url":"https://...","token":"..."}: nothing that breaks a quoted string
+_RECORD_RE = re.compile(r'^[A-Za-z0-9{}":,./_\-]*$')
 
 
 def server_config(id_server: str, relay_server: str, key: str) -> str:
@@ -182,14 +200,24 @@ def host_script(
     sha256: str = "",
     install: bool,
     config: str = "",
+    record: str | None = None,
 ) -> str:
-    """Install (optional) + set password + print id, for the agent's platform."""
+    """
+    Install (optional) + set password + print id, for the agent's platform.
+    record: JSON for --record-config ("" = recording off), None = don't touch
+    (the combined installer applies it after the enroll).
+    """
+    if record and not _RECORD_RE.match(record):
+        raise ValueError("Invalid recording config")
     values = {
         "INSTALL": "1" if install else "0",
         "DOWNLOAD": download_url,
         "SHA256": sha256.lower(),
-        "PASSWORD": password,
         "CONFIG": config,
+        "RECORD_SET": "0" if record is None else "1",
+        # user values last: their text is never scanned for placeholders
+        "RECORD": record or "",
+        "PASSWORD": password,
     }
     if plat == "windows":
         values.update({"EXE": WIN_EXE, "SERVICE": WIN_SERVICE})

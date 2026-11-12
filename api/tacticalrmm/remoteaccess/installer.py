@@ -16,7 +16,7 @@ from django.conf import settings
 
 from .files import GOARCH, api_url, download_url, enroll_ticket, host_file, sha256
 from .models import RemoteAccessConfig
-from .scripts import host_script, server_config
+from .scripts import LINUX_BIN, WIN_EXE, host_script, server_config
 
 
 class InstallerError(ValueError):
@@ -124,6 +124,7 @@ def build_windows(request, site, data, remote_access: bool = True, created: list
     for key, value in {
         "__TRMM_SCRIPT__": trmm.replace("'@", "' @"),
         "__HOST_SCRIPT__": host_part,
+        "__RA_EXE__": WIN_EXE,
         "__API__": api_base,
         "__TOKEN__": token,
         "__SITE__": str(site.pk),
@@ -190,6 +191,7 @@ def build_linux(request, site, data) -> str:
     for key, value in {
         "__TRMM_SCRIPT__": trmm,
         "__HOST_SCRIPT__": host_part,
+        "__RA_BIN__": LINUX_BIN,
         "__API__": api_base,
         "__TOKEN__": token,
         "__SITE__": str(site.pk),
@@ -245,8 +247,18 @@ if ($hostOutput -match 'TRMMRA-ID:(\S+)') {
     } | ConvertTo-Json
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-RestMethod -Method Post -Uri '__API__/remoteaccess/enroll/' -Body $body -ContentType 'application/json' -Headers @{ Authorization = 'Token __TOKEN__' } | Out-Null
+        $resp = Invoke-RestMethod -Method Post -Uri '__API__/remoteaccess/enroll/' -Body $body -ContentType 'application/json' -Headers @{ Authorization = 'Token __TOKEN__' }
         Write-Output "Remote access registered (id $remoteId)."
+        # session recording: upload url + token of this computer
+        if ($resp.record_url) {
+            $recWork = Join-Path $env:SystemRoot ('Temp	rmm-rec-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Force $recWork | Out-Null
+            & icacls.exe $recWork /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+            $recFile = Join-Path $recWork 'rec.json'
+            (@{ url = [string]$resp.record_url; token = [string]$resp.record_token } | ConvertTo-Json -Compress) | Set-Content -Path $recFile -NoNewline -Encoding ASCII
+            & '__RA_EXE__' --record-config $recFile | Out-Null
+            Remove-Item $recWork -Recurse -Force -ErrorAction SilentlyContinue
+        }
     } catch {
         Write-Warning "Remote access installed (id $remoteId) but could not be registered: $($_.Exception.Message)"
     }
@@ -286,9 +298,19 @@ if [ -n "$REMOTE_ID" ]; then
     js() { printf '%s' "$1" | tr -d '"\\\000-\037'; }
     BODY=$(printf '{"remote_id":"%s","password":"%s","hostname":"%s","os":"%s","site":"%s","ticket":"%s","agent_id":"%s"}' \
         "$(js "$REMOTE_ID")" "$RA_PASSWORD" "$(js "$(hostname)")" "$(js "$OS_NAME")" "__SITE__" "__TICKET__" "$(js "$AGENT_ID")")
-    if curl -fsS -X POST -H 'Content-Type: application/json' -H 'Authorization: Token __TOKEN__' \
-        -d "$BODY" '__API__/remoteaccess/enroll/' >/dev/null; then
+    if RESP=$(curl -fsS -X POST -H 'Content-Type: application/json' -H 'Authorization: Token __TOKEN__' \
+        -d "$BODY" '__API__/remoteaccess/enroll/'); then
         echo "Remote access registered (id $REMOTE_ID)."
+        # session recording: upload url + token of this computer
+        REC_URL=$(printf '%s' "$RESP" | sed -n 's/.*"record_url" *: *"\([^"]*\)".*/\1/p')
+        REC_TOKEN=$(printf '%s' "$RESP" | sed -n 's/.*"record_token" *: *"\([^"]*\)".*/\1/p')
+        if [ -n "$REC_URL" ] && [ -n "$REC_TOKEN" ]; then
+            RECF=$(mktemp)
+            chmod 600 "$RECF"
+            printf '{"url":"%s","token":"%s"}' "$REC_URL" "$REC_TOKEN" > "$RECF"
+            '__RA_BIN__' --record-config "$RECF" >/dev/null 2>&1
+            rm -f "$RECF"
+        fi
     else
         echo "WARNING: remote access installed (id $REMOTE_ID) but could not be registered."
     fi

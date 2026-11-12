@@ -142,6 +142,8 @@ class Role(BaseAuditModel):
     can_use_quick_support = models.BooleanField(default=False)
     # remote desktop with the TRMM Desktop app (RustDesk engine)
     can_use_remote_access = models.BooleanField(default=False)
+    # watch the recordings of remote sessions (recordings app)
+    can_view_recordings = models.BooleanField(default=False)
 
     # core
     can_list_notes = models.BooleanField(default=False)

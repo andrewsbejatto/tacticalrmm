@@ -97,6 +97,14 @@ app.conf.beat_schedule = {
         "task": "core.tasks.celery_heartbeat_task",
         "schedule": timedelta(seconds=60.0),
     },
+    "recordings-scan-mesh": {
+        "task": "recordings.tasks.scan_mesh_recordings_task",
+        "schedule": timedelta(minutes=2),
+    },
+    "recordings-retry": {
+        "task": "recordings.tasks.retry_recordings_task",
+        "schedule": timedelta(minutes=5),
+    },
 }
 
 

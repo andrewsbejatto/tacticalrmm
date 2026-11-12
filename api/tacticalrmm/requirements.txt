@@ -27,6 +27,7 @@ python-ipware==2.0.2
 qrcode==8.2
 redis==6.4.0
 requests==2.34.2
+boto3==1.44.1
 six==1.17.0
 sqlparse==0.5.3
 tldextract==5.3.2

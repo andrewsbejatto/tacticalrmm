@@ -40,6 +40,8 @@ def provision_remote_access_task(
         url, digest = download_url(api_url, plat, arch), sha256(path)
 
     try:
+        from recordings.views import host_record_json
+
         cfg = RemoteAccessConfig.load()
         script = host_script(
             plat=plat,
@@ -48,6 +50,7 @@ def provision_remote_access_task(
             sha256=digest,
             install=install,
             config=server_config(cfg.id_server, cfg.relay_server, cfg.public_key),
+            record=host_record_json(device, api_url),
         )
     except ValueError as e:
         return fail(str(e))

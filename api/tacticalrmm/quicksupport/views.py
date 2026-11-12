@@ -5,6 +5,7 @@ import secrets
 from datetime import timedelta
 
 from django.conf import settings
+from django.core.cache import cache
 from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone as djangotime
@@ -69,6 +70,13 @@ class QuickSupportClientThrottle(SimpleRateThrottle):
 
     def get_cache_key(self, request, view):
         return self.cache_format % {"scope": self.scope, "ident": _real_ip(request)}
+
+
+class QuickSupportHeartbeatThrottle(QuickSupportClientThrottle):
+    """The executable polls every few seconds to follow the technician."""
+
+    scope = "quicksupport_heartbeat"
+    rate = "120/minute"
 
 
 class QuickSupportGlobalThrottle(SimpleRateThrottle):
@@ -232,7 +240,7 @@ class ClientSessions(APIView):
 class ClientSessionHeartbeat(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
-    throttle_classes = [QuickSupportClientThrottle]
+    throttle_classes = [QuickSupportHeartbeatThrottle]
 
     def post(self, request, pk):
         session = _get_client_session(request, pk)
@@ -252,18 +260,108 @@ class ClientSessionHeartbeat(APIView):
                     fields.append("remote_password_enc")
             session.save(update_fields=fields)
 
-        return Response(
-            {
-                "status": session.status,
-                "install_status": session.install_status,
-                "technician": (
-                    session.connected_by.get_full_name()
-                    or session.connected_by.username
-                    if session.connected_by
-                    else ""
-                ),
-            }
+        # follow the technician's windows in meshcentral (closed, or connected
+        # again from the meshcentral window without the "connect" of the app)
+        if session.kind == "mesh" and not request.data.get("check_agent"):
+            _sync_mesh_status(session)
+
+        data = {
+            "status": session.status,
+            "install_status": session.install_status,
+            "technician": (
+                session.connected_by.get_full_name()
+                or session.connected_by.username
+                if session.connected_by
+                else ""
+            ),
+        }
+        # the executable asks this until the mesh agent is connected to
+        # meshcentral, so it only shows "ready" when the technician can connect
+        if request.data.get("check_agent") and session.kind == "mesh":
+            data["agent_online"] = _mesh_agent_online(session)
+        return Response(data)
+
+
+def _mesh_agent_online(session) -> bool:
+    if session.status != QuickSupportStatus.WAITING:
+        return True
+    # at most one meshcentral query every few seconds per session
+    key = f"qs_agent_online_{session.pk}"
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        node = find_session_node(QuickSupportConfig.load(), session)
+        online = bool(node and node.get("conn", 0) & 1)
+    except MeshError as e:
+        logger.error(f"quick support: unable to check the mesh agent: {e}")
+        online = False
+    cache.set(key, online, 3 if not online else 60)
+    return online
+
+
+# sessions reported by the mesh agent that mean a technician is working on the
+# computer (remote desktop, terminal, files)
+MESH_TECH_SESSIONS = ("kvm", "terminal", "files")
+# time the technician has to open the window after "connect" (until the
+# agent reports the session)
+CONNECT_GRACE = timedelta(seconds=60)
+
+
+def _mesh_tech_active(session) -> bool | None:
+    """True when the agent reports a technician session, None = unknown."""
+    key = f"qs_tech_active_{session.pk}"
+    cached = cache.get(key)
+    if cached is not None:
+        return None if cached < 0 else bool(cached)
+    try:
+        node = find_session_node(QuickSupportConfig.load(), session)
+    except MeshError as e:
+        logger.error(f"quick support: unable to check the mesh sessions: {e}")
+        node = None
+    if node is None:
+        value = -1
+    else:
+        sessions = node.get("sessions") or {}
+        value = 1 if any(sessions.get(k) for k in MESH_TECH_SESSIONS) else 0
+    # the executable polls every 3 s, query meshcentral at most every 2 s
+    cache.set(key, value, 2)
+    return None if value < 0 else bool(value)
+
+
+def _seen_key(session) -> str:
+    # per connection: set once the technician's window was seen open
+    conn = int(session.connected_at.timestamp()) if session.connected_at else 0
+    return f"qs_tech_seen_{session.pk}_{conn}"
+
+
+def _sync_mesh_status(session) -> None:
+    if session.status not in (QuickSupportStatus.CONNECTED, QuickSupportStatus.WAITING):
+        return
+    active = _mesh_tech_active(session)
+    if active is None:
+        # unknown: keep the current status
+        return
+
+    if session.status == QuickSupportStatus.CONNECTED:
+        if active:
+            cache.set(_seen_key(session), True, 24 * 3600)
+            return
+        # closed after it was open: left now; never opened: wait the grace time
+        in_grace = (
+            session.connected_at
+            and djangotime.now() - session.connected_at < CONNECT_GRACE
         )
+        if cache.get(_seen_key(session)) or not in_grace:
+            session.status = QuickSupportStatus.WAITING
+            session.save(update_fields=["status"])
+    elif active:
+        # connected again from the meshcentral window (keeps the technician
+        # of the last "connect")
+        session.status = QuickSupportStatus.CONNECTED
+        session.connected_at = djangotime.now()
+        session.save(update_fields=["status", "connected_at"])
+        cache.set(_seen_key(session), True, 24 * 3600)
 
 
 class ClientSessionClose(APIView):

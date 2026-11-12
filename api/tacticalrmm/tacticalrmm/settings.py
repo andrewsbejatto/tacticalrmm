@@ -296,6 +296,7 @@ INSTALLED_APPS = [
     "alerts",
     "quicksupport",
     "remoteaccess",
+    "recordings",
     "ee.sso",
 ]
 

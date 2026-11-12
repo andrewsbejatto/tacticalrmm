@@ -165,6 +165,7 @@ def dashboard_info(request):
             "web_terminal_enabled": core_settings.web_terminal_enabled,
             "can_use_quick_support": bool(_has_perm(request, "can_use_quick_support")),
             "can_use_remote_access": bool(_has_perm(request, "can_use_remote_access")),
+            "can_view_recordings": bool(_has_perm(request, "can_view_recordings")),
             "block_local_user_logon": core_settings.block_local_user_logon,
             "sso_enabled": core_settings.sso_enabled,
         }

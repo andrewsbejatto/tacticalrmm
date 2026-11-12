@@ -100,11 +100,12 @@ namespace TacticalRMM.QuickSupport
         public static string Title { get { return Pt ? "Suporte Remoto" : "Remote Support"; } }
         public static string YourCode { get { return Pt ? "Informe este código ao técnico:" : "Give this code to the technician:"; } }
         public static string Connecting { get { return Pt ? "Conectando ao servidor..." : "Connecting to the server..."; } }
-        public static string Downloading { get { return Pt ? "Preparando o acesso remoto..." : "Preparing remote access..."; } }
-        public static string Waiting { get { return Pt ? "Aguardando o técnico se conectar." : "Waiting for the technician to connect."; } }
+        public static string Downloading { get { return Pt ? "Aguarde: baixando e preparando os arquivos do suporte..." : "Please wait: downloading and preparing the support files..."; } }
+        public static string Waiting { get { return Pt ? "Pronto! Aguardando o técnico se conectar." : "Ready! Waiting for the technician to connect."; } }
         public static string ConnectedBy { get { return Pt ? "Técnico conectado: {0}" : "Technician connected: {0}"; } }
         public static string Connected { get { return Pt ? "Técnico conectado." : "Technician connected."; } }
         public static string Ended { get { return Pt ? "A sessão de suporte foi encerrada." : "The support session has ended."; } }
+        public static string StillPreparing { get { return Pt ? "Aguarde: ainda conectando ao servidor de suporte..." : "Please wait: still connecting to the support server..."; } }
         public static string Retrying { get { return Pt ? "Sem conexão com o servidor, tentando novamente..." : "Unable to reach the server, retrying..."; } }
         public static string Failed { get { return Pt ? "Não foi possível iniciar o suporte remoto:\n{0}" : "Unable to start remote support:\n{0}"; } }
         public static string CopyCode { get { return Pt ? "Copiar código" : "Copy code"; } }
@@ -510,6 +511,8 @@ namespace TacticalRMM.QuickSupport
         private readonly Label statusLabel = new Label();
         private readonly Label infoLabel = new Label();
         private readonly Label messageLabel = new Label();
+        // shown while the session is created and the agent is downloaded/prepared
+        private readonly ProgressBar prepareBar = new ProgressBar();
         private readonly Button copyButton = new Button();
         private readonly Button adminButton = new Button();
         private readonly Button endButton = new Button();
@@ -517,6 +520,17 @@ namespace TacticalRMM.QuickSupport
         private string installState = "";
         private bool installRunning;
         private int normalInterval = 30000;
+        // false until the server confirms the mesh agent is connected to
+        // meshcentral (before that the technician can't connect yet)
+        private bool agentReady;
+        private DateTime preparingSince;
+        private string formattedCode = "";
+        private string welcomeMessage = "";
+        // the status (preparing / ready / technician connected) is checked
+        // every few seconds so the window follows the technician quickly
+        // (the server allows 120 heartbeats/min per ip)
+        private const int PreparingInterval = 3000;
+        private const int ActiveInterval = 3000;
 
         private static readonly Color Accent = Color.FromArgb(25, 118, 210);
 
@@ -579,6 +593,10 @@ namespace TacticalRMM.QuickSupport
             messageLabel.TextAlign = ContentAlignment.MiddleCenter;
             messageLabel.ForeColor = Color.DimGray;
 
+            prepareBar.Style = ProgressBarStyle.Marquee;
+            prepareBar.MarqueeAnimationSpeed = 30;
+            prepareBar.SetBounds(120, 228, 200, 12);
+
             infoLabel.Text = Strings.Info;
             infoLabel.SetBounds(20, 258, 400, 50);
             infoLabel.TextAlign = ContentAlignment.MiddleCenter;
@@ -600,7 +618,7 @@ namespace TacticalRMM.QuickSupport
             installButton.Enabled = false;
             installButton.Click += delegate { RequestInstall(); };
 
-            Controls.AddRange(new Control[] { header, hintLabel, codeLabel, copyButton, statusLabel, messageLabel, infoLabel, adminButton, endButton, installButton });
+            Controls.AddRange(new Control[] { header, hintLabel, codeLabel, copyButton, statusLabel, prepareBar, messageLabel, infoLabel, adminButton, endButton, installButton });
 
             heartbeatTimer.Tick += delegate { Heartbeat(); };
             Shown += delegate { StartSession(); };
@@ -640,6 +658,13 @@ namespace TacticalRMM.QuickSupport
             Close();
         }
 
+        // Color.Empty = default text color
+        private void SetStatus(string text, Color color)
+        {
+            statusLabel.Text = text;
+            statusLabel.ForeColor = color.IsEmpty ? ForeColor : color;
+        }
+
         private void StartSession()
         {
             ThreadPool.QueueUserWorkItem(delegate
@@ -664,11 +689,7 @@ namespace TacticalRMM.QuickSupport
                     int interval = 30;
                     if (resp.ContainsKey("heartbeat_interval")) int.TryParse(resp["heartbeat_interval"].ToString(), out interval);
 
-                    Ui(delegate
-                    {
-                        statusLabel.Text = Strings.Downloading;
-                        messageLabel.Text = message;
-                    });
+                    Ui(delegate { SetStatus(Strings.Downloading, Color.DarkOrange); });
 
                     agent = new MeshAgentRunner(IsAdministrator());
                     string tag = resp.ContainsKey("tag") && resp["tag"] != null ? resp["tag"].ToString() : null;
@@ -685,22 +706,24 @@ namespace TacticalRMM.QuickSupport
                     }
                     agent.Start();
 
+                    // keep "please wait" until the agent is connected to the server
                     Ui(delegate
                     {
-                        codeLabel.Text = formatted;
-                        copyButton.Enabled = true;
-                        statusLabel.Text = Strings.Waiting;
-                        normalInterval = Math.Max(interval, 5) * 1000;
-                        heartbeatTimer.Interval = normalInterval;
+                        formattedCode = formatted;
+                        welcomeMessage = message;
+                        normalInterval = Math.Min(Math.Max(interval, 3) * 1000, ActiveInterval);
+                        preparingSince = DateTime.UtcNow;
+                        heartbeatTimer.Interval = PreparingInterval;
                         heartbeatTimer.Start();
-                        installButton.Enabled = !config.Insecure;
+                        Heartbeat();
                     });
                 }
                 catch (Exception ex)
                 {
                     Ui(delegate
                     {
-                        statusLabel.Text = "";
+                        prepareBar.Visible = false;
+                        SetStatus("", Color.Empty);
                         MessageBox.Show(this, string.Format(Strings.Failed, ex.Message), Strings.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                         closingConfirmed = true;
                         Close();
@@ -711,6 +734,18 @@ namespace TacticalRMM.QuickSupport
 
         private bool heartbeatRunning;
 
+        private void ShowReady()
+        {
+            agentReady = true;
+            codeLabel.Text = formattedCode;
+            copyButton.Enabled = true;
+            prepareBar.Visible = false;
+            messageLabel.Text = welcomeMessage;
+            SetStatus(Strings.Waiting, Color.ForestGreen);
+            if (heartbeatTimer.Interval == PreparingInterval) heartbeatTimer.Interval = normalInterval;
+            installButton.Enabled = !config.Insecure;
+        }
+
         private void Heartbeat()
         {
             if (heartbeatRunning || !sessionOpen) return;
@@ -719,23 +754,45 @@ namespace TacticalRMM.QuickSupport
             {
                 try
                 {
-                    var resp = api.Post("/quicksupport/client/sessions/" + api.SessionId + "/heartbeat/", null);
+                    bool preparing = !agentReady;
+                    Dictionary<string, object> body = null;
+                    if (preparing) body = new Dictionary<string, object> { { "check_agent", true } };
+                    var resp = api.Post("/quicksupport/client/sessions/" + api.SessionId + "/heartbeat/", body);
                     heartbeatFailures = 0;
                     string status = resp.ContainsKey("status") ? resp["status"].ToString() : "";
                     string tech = resp.ContainsKey("technician") && resp["technician"] != null ? resp["technician"].ToString() : "";
                     string install = resp.ContainsKey("install_status") && resp["install_status"] != null ? resp["install_status"].ToString() : "";
+                    // older servers don't send agent_online: ready right away
+                    bool online = !resp.ContainsKey("agent_online") || resp["agent_online"] is bool && (bool)resp["agent_online"];
                     Ui(delegate
                     {
+                        if (preparing && !agentReady)
+                        {
+                            if (status == "closed") { SessionEndedByServer(); return; }
+                            if (!online && status != "connected")
+                            {
+                                bool slow = (DateTime.UtcNow - preparingSince).TotalSeconds > 120;
+                                SetStatus(slow ? Strings.StillPreparing : Strings.Downloading, Color.DarkOrange);
+                                return;
+                            }
+                            ShowReady();
+                        }
                         OnInstallStatus(install);
-                        if (status == "connected") statusLabel.Text = string.IsNullOrEmpty(tech) ? Strings.Connected : string.Format(Strings.ConnectedBy, tech);
-                        else if (status == "waiting") statusLabel.Text = Strings.Waiting;
+                        if (status == "connected")
+                        {
+                            SetStatus(string.IsNullOrEmpty(tech) ? Strings.Connected : string.Format(Strings.ConnectedBy, tech), Accent);
+                        }
+                        else if (status == "waiting")
+                        {
+                            SetStatus(Strings.Waiting, Color.ForestGreen);
+                        }
                         else if (status == "closed") SessionEndedByServer();
                     });
                 }
                 catch (Exception)
                 {
                     heartbeatFailures++;
-                    Ui(delegate { statusLabel.Text = Strings.Retrying; });
+                    Ui(delegate { SetStatus(Strings.Retrying, Color.DarkOrange); });
                 }
                 finally
                 {
@@ -885,7 +942,7 @@ namespace TacticalRMM.QuickSupport
             codeLabel.Text = "--- --- ---";
             copyButton.Enabled = false;
             installButton.Enabled = false;
-            statusLabel.Text = Strings.Ended;
+            SetStatus(Strings.Ended, Color.Empty);
         }
 
         private void Ui(MethodInvoker action)
