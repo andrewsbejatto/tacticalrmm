@@ -92,3 +92,59 @@ def provision_remote_access_task(
         ),
     )
     return "ok"
+
+
+# ------------------------------------------------------------------ bulk install
+# Each install keeps a celery worker busy until the computer finishes (minutes)
+# and the standard install runs celery with --autoscale=10,4: the bulk install
+# runs in a few lanes, one computer at a time per lane, so the rest of tactical
+# keeps its workers.
+BULK_LANES = 3
+
+
+def bulk_queued_key(device_pk: int) -> str:
+    return f"remoteaccess_bulk_queued_{device_pk}"
+
+
+def start_bulk_provision(device_pks: list[int], api_url: str, username: str) -> int:
+    from celery import chain
+    from django.core.cache import cache
+
+    lanes: list[list[int]] = [[] for _ in range(BULK_LANES)]
+    for i, pk in enumerate(device_pks):
+        lanes[i % BULK_LANES].append(pk)
+        # avoids queueing the same computer twice (until its turn ends)
+        cache.set(bulk_queued_key(pk), True, 24 * 3600)
+    for lane in lanes:
+        if lane:
+            chain(
+                bulk_provision_step_task.si(pk, api_url, username) for pk in lane
+            ).apply_async()
+    return len(device_pks)
+
+
+@app.task
+def bulk_provision_step_task(device_pk: int, api_url: str, username: str) -> str:
+    """One computer of a bulk install; never raises, so the lane goes on."""
+    from django.core.cache import cache
+
+    from .crypto import make_password
+
+    try:
+        device = RemoteAccessDevice.objects.select_related("agent").filter(pk=device_pk).first()
+        if device is None or device.agent is None:
+            return "no device/agent"
+        if device.agent.status != "online":
+            # would hold the lane until the nats timeout
+            device.last_error = "Offline when its turn came in the bulk install, try again"
+            device.save(update_fields=["last_error", "updated"])
+            return "offline"
+        device.status = RemoteAccessStatus.INSTALLING
+        device.last_error = ""
+        device.save(update_fields=["status", "last_error", "updated"])
+        return provision_remote_access_task(device_pk, make_password(), True, api_url, username)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"remote access bulk install of device {device_pk}: {e}")
+        return f"error: {e}"
+    finally:
+        cache.delete(bulk_queued_key(device_pk))

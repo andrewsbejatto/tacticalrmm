@@ -219,14 +219,35 @@ class BulkProvision(APIView):
         if not request.data.get("reinstall"):
             agents = agents.exclude(remote_access__status=RemoteAccessStatus.OK)
 
-        started = offline = 0
+        from django.core.cache import cache
+
+        from .tasks import BULK_LANES, bulk_queued_key, start_bulk_provision
+
+        device_pks: list[int] = []
+        offline = queued = 0
         for agent in agents.only("pk", "agent_id", "hostname", "plat", "last_seen", "offline_time", "overdue_time"):
             if agent.status != "online":
                 offline += 1
                 continue
-            _start_provision(request, agent, install=True)
-            started += 1
-        return Response({"started": started, "offline": offline})
+            device, _ = RemoteAccessDevice.objects.get_or_create(
+                agent=agent, defaults={"hostname": agent.hostname}
+            )
+            if device.status == RemoteAccessStatus.INSTALLING or cache.get(bulk_queued_key(device.pk)):
+                queued += 1
+                continue
+            device_pks.append(device.pk)
+
+        started = start_bulk_provision(device_pks, api_url(request), request.user.username)
+        if started:
+            _audit(
+                request,
+                f"{request.user.username} started the remote access (TRMM Desktop) install "
+                f"on {started} computer(s)"
+                f"{' (reinstall included)' if request.data.get('reinstall') else ''}.",
+            )
+        return Response(
+            {"started": started, "offline": offline, "queued": queued, "parallel": BULK_LANES}
+        )
 
 
 def _connect_response(request, device: RemoteAccessDevice):
