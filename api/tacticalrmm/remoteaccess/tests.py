@@ -84,3 +84,57 @@ class TestBulkProvision(TacticalTestCase):
         self.assertEqual(args[0], dev.pk)
         self.assertEqual(len(args[1]), 20)  # password generated at its turn
         self.assertTrue(args[2])
+
+
+class TestWindowsScripts(TacticalTestCase):
+    # Windows 7 has PowerShell 2.0, 8.1 / 2012 R2 have 4.0
+    PS3_ONLY = (
+        "-NoNewline",
+        "Get-FileHash",
+        "Invoke-WebRequest",
+        "Invoke-RestMethod",
+        "ConvertTo-Json",
+        "ConvertFrom-Json",
+        "Get-CimInstance",
+        "SecurityProtocolType]::Tls12",
+    )
+
+    @staticmethod
+    def code(script: str) -> str:
+        """the script without its comment lines"""
+        return "\n".join(line for line in script.splitlines() if not line.strip().startswith("#"))
+
+    def test_host_script_runs_on_old_powershell(self):
+        from .scripts import host_script
+
+        script = host_script(
+            plat="windows",
+            password="Abc123",
+            download_url="https://api.x/d",
+            sha256="0" * 64,
+            install=True,
+            record='{"url":"https://api.x/r","token":"t"}',
+        )
+        for word in self.PS3_ONLY:
+            self.assertNotIn(word, self.code(script))
+        self.assertIn("TrmmAscii $_.Exception.Message", script)
+
+    def test_combined_installer_runs_on_old_powershell(self):
+        from .installer import COMBINED_PS1
+
+        for word in self.PS3_ONLY:
+            self.assertNotIn(word, self.code(COMBINED_PS1))
+        self.assertNotIn("\t", COMBINED_PS1)
+
+    def test_localized_error_keeps_its_accents(self):
+        from .scripts import parse_result
+
+        # what TrmmAscii (PowerShell) prints: 7-bit text with \uXXXX escapes
+        out = (
+            r"TRMMRA-ERR:N\u00e3o \u00e9 poss\u00edvel localizar um par\u00e2metro "
+            r"'NoNewline' em C:\u005cTemp" + "\r\n"
+        )
+        self.assertTrue(out.isascii())
+        ok, remote_id, msg = parse_result(out)
+        self.assertFalse(ok)
+        self.assertEqual(msg, "Não é possível localizar um parâmetro 'NoNewline' em C:\\Temp")

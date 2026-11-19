@@ -16,7 +16,7 @@ from django.conf import settings
 
 from .files import GOARCH, api_url, download_url, enroll_ticket, host_file, sha256
 from .models import RemoteAccessConfig
-from .scripts import LINUX_BIN, WIN_EXE, host_script, server_config
+from .scripts import LINUX_BIN, WIN_EXE, WIN_PS_HELPERS, host_script, server_config
 
 
 class InstallerError(ValueError):
@@ -124,6 +124,7 @@ def build_windows(request, site, data, remote_access: bool = True, created: list
     for key, value in {
         "__TRMM_SCRIPT__": trmm.replace("'@", "' @"),
         "__HOST_SCRIPT__": host_part,
+        "__PS_HELPERS__": WIN_PS_HELPERS,
         "__RA_EXE__": WIN_EXE,
         "__API__": api_base,
         "__TOKEN__": token,
@@ -224,6 +225,32 @@ try {
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 
 # 2) Remote access (always)
+__PS_HELPERS__
+function TrmmJson([hashtable]$Data) {
+    # minimal JSON object of strings (ConvertTo-Json needs PowerShell 3)
+    $parts = @()
+    foreach ($k in $Data.Keys) {
+        $v = $Data[$k]
+        if ($null -eq $v) { $parts += ('"' + $k + '":null'); continue }
+        $sb = New-Object Text.StringBuilder
+        foreach ($c in ([string]$v).ToCharArray()) {
+            $n = [int]$c
+            if ($n -eq 34) { [void]$sb.Append('\"') }
+            elseif ($n -eq 92) { [void]$sb.Append('\\') }
+            elseif ($n -lt 32 -or $n -gt 126) { [void]$sb.Append(('\u{0:x4}' -f $n)) }
+            else { [void]$sb.Append($c) }
+        }
+        $parts += ('"' + $k + '":"' + $sb.ToString() + '"')
+    }
+    return '{' + ($parts -join ',') + '}'
+}
+function TrmmJsonValue([string]$Json, [string]$Name) {
+    # string value of a flat JSON response (ConvertFrom-Json needs PowerShell 3)
+    if ($Json -match ('"' + $Name + '"\s*:\s*"((?:[^"\\]|\\.)*)"')) {
+        return ($Matches[1] -replace '\\/', '/')
+    }
+    return ''
+}
 $chars = [char[]]'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
 $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
 $bytes = New-Object byte[] 20
@@ -232,35 +259,48 @@ $raPassword = -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
 $hostOutput = & {
 __HOST_SCRIPT__
 } | Out-String
-Write-Output $hostOutput
+# errors come as \uXXXX (TrmmAscii): show them with their accents
+Write-Output ([regex]::Replace($hostOutput, '\\u([0-9a-fA-F]{4})', [Text.RegularExpressions.MatchEvaluator] { param($m) [string][char][Convert]::ToInt32($m.Groups[1].Value, 16) }))
 if ($hostOutput -match 'TRMMRA-ID:(\S+)') {
     $remoteId = $Matches[1]
     $agentId = (Get-ItemProperty 'HKLM:\SOFTWARE\TacticalRMM' -ErrorAction SilentlyContinue).AgentID
-    $body = @{
+    $osName = ''
+    try { $osName = [string](Get-WmiObject Win32_OperatingSystem).Caption } catch { }
+    $body = TrmmJson @{
         remote_id = $remoteId
         password  = $raPassword
         hostname  = $env:COMPUTERNAME
-        os        = (Get-CimInstance Win32_OperatingSystem).Caption
+        os        = $osName
         site      = '__SITE__'
         ticket    = '__TICKET__'
         agent_id  = $agentId
-    } | ConvertTo-Json
+    }
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $resp = Invoke-RestMethod -Method Post -Uri '__API__/remoteaccess/enroll/' -Body $body -ContentType 'application/json' -Headers @{ Authorization = 'Token __TOKEN__' }
+        TrmmTls12
+        $wc = New-Object Net.WebClient
+        $wc.Encoding = [Text.Encoding]::UTF8
+        $wc.Headers['Content-Type'] = 'application/json'
+        $wc.Headers['Authorization'] = 'Token __TOKEN__'
+        $resp = $wc.UploadString('__API__/remoteaccess/enroll/', 'POST', $body)
         Write-Output "Remote access registered (id $remoteId)."
         # session recording: upload url + token of this computer
-        if ($resp.record_url) {
-            $recWork = Join-Path $env:SystemRoot ('Temp	rmm-rec-' + [guid]::NewGuid().ToString('N'))
+        $recUrl = TrmmJsonValue $resp 'record_url'
+        if ($recUrl) {
+            $recWork = Join-Path $env:SystemRoot ('Temp\trmm-rec-' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Force $recWork | Out-Null
             & icacls.exe $recWork /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
             $recFile = Join-Path $recWork 'rec.json'
-            (@{ url = [string]$resp.record_url; token = [string]$resp.record_token } | ConvertTo-Json -Compress) | Set-Content -Path $recFile -NoNewline -Encoding ASCII
+            TrmmWriteAscii $recFile (TrmmJson @{ url = $recUrl; token = (TrmmJsonValue $resp 'record_token') })
             & '__RA_EXE__' --record-config $recFile | Out-Null
             Remove-Item $recWork -Recurse -Force -ErrorAction SilentlyContinue
         }
     } catch {
-        Write-Warning "Remote access installed (id $remoteId) but could not be registered: $($_.Exception.Message)"
+        $detail = ''
+        try {
+            $r = $_.Exception.InnerException.Response
+            if ($r) { $detail = ' ' + (New-Object IO.StreamReader($r.GetResponseStream())).ReadToEnd() }
+        } catch { }
+        Write-Warning "Remote access installed (id $remoteId) but could not be registered: $($_.Exception.Message)$detail"
     }
 } else {
     Write-Warning 'Remote access could not be installed.'

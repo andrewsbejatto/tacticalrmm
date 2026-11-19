@@ -19,11 +19,46 @@ WIN_EXE = r"C:\Program Files\TRMMDesktop\trmmdesktop.exe"
 LINUX_BIN = "/usr/bin/trmmdesktop"
 LINUX_SERVICE = "trmmdesktop"
 
-_WIN_HOST = r"""
+# PowerShell helpers shared by the Windows scripts. Everything must run on
+# Windows PowerShell 2.0 (Windows 7) and 4.0 (8.1 / 2012 R2): no -NoNewline,
+# Get-FileHash, Invoke-WebRequest/RestMethod, ConvertTo/From-Json, Get-CimInstance.
+WIN_PS_HELPERS = r"""
+function TrmmTls12 {
+    # tls 1.2 on .NET 4.0 / 4.5 (the enum name doesn't exist on older .NET)
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch { }
+}
+function TrmmWriteAscii([string]$Path, [string]$Text) {
+    # no trailing newline, no BOM
+    [IO.File]::WriteAllText($Path, $Text, (New-Object Text.ASCIIEncoding))
+}
+function TrmmSha256([string]$Path) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $fs = [IO.File]::OpenRead($Path)
+    try { $h = $sha.ComputeHash($fs) } finally { $fs.Close() }
+    return ([BitConverter]::ToString($h) -replace '-', '').ToLower()
+}
+function TrmmDownload([string]$Url, [string]$Path) {
+    TrmmTls12
+    (New-Object Net.WebClient).DownloadFile($Url, $Path)
+}
+function TrmmAscii([string]$Text) {
+    # messages of a localized Windows have accents and the agent output is not
+    # always utf-8: send them as \uXXXX (decoded by the server, parse_result)
+    $sb = New-Object Text.StringBuilder
+    foreach ($c in $Text.ToCharArray()) {
+        $n = [int]$c
+        if ($n -ge 32 -and $n -lt 127 -and $n -ne 92) { [void]$sb.Append($c) }
+        else { [void]$sb.Append(('\u{0:x4}' -f $n)) }
+    }
+    return $sb.ToString()
+}
+"""
+
+_WIN_HOST = WIN_PS_HELPERS + r"""
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    TrmmTls12
     $exe = '__EXE__'
     # work folder only SYSTEM/Administrators can write (ProgramData lets users
     # create files: they could swap the setup or plant a DLL next to it)
@@ -32,8 +67,8 @@ try {
     & icacls.exe $work /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
     if ('__INSTALL__' -eq '1') {
         $setup = Join-Path $work 'trmmdesktop-setup.exe'
-        Invoke-WebRequest -UseBasicParsing -Uri '__DOWNLOAD__' -OutFile $setup
-        if ((Get-FileHash $setup -Algorithm SHA256).Hash.ToLower() -ne '__SHA256__') {
+        TrmmDownload '__DOWNLOAD__' $setup
+        if ((TrmmSha256 $setup) -ne '__SHA256__') {
             throw 'installer checksum mismatch'
         }
         Start-Process -FilePath $setup -ArgumentList '--silent-install' -Wait
@@ -60,7 +95,7 @@ try {
     for ($i = 0; ($i -lt 15) -and -not $done; $i++) {
         Start-Sleep 3
         $pwFile = Join-Path $work 'pw.txt'
-        Set-Content -Path $pwFile -Value '__PASSWORD__' -NoNewline -Encoding ASCII
+        TrmmWriteAscii $pwFile '__PASSWORD__'
         $out = (& $exe --password-file $pwFile | Out-String).Trim()
         Remove-Item $pwFile -Force -ErrorAction SilentlyContinue
         if ($out -match 'Done') { $done = $true }
@@ -70,7 +105,7 @@ try {
     # empty file = off. Older builds ignore the option.
     if ('__RECORD_SET__' -eq '1') {
         $recFile = Join-Path $work 'rec.json'
-        Set-Content -Path $recFile -Value '__RECORD__' -NoNewline -Encoding ASCII
+        TrmmWriteAscii $recFile '__RECORD__'
         & $exe --record-config $recFile | Out-Null
         Remove-Item $recFile -Force -ErrorAction SilentlyContinue
     }
@@ -83,7 +118,7 @@ try {
     Write-Output "TRMMRA-ID:$id"
     Write-Output 'TRMMRA-OK:ok'
 } catch {
-    Write-Output ("TRMMRA-ERR:" + $_.Exception.Message)
+    Write-Output ("TRMMRA-ERR:" + (TrmmAscii $_.Exception.Message))
 } finally {
     if ($work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -228,6 +263,11 @@ def host_script(
     raise ValueError(f"Unsupported platform: {plat}")
 
 
+def decode_ascii(text: str) -> str:
+    r"""Undoes TrmmAscii (PowerShell): \uXXXX -> the character."""
+    return re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), text)
+
+
 def parse_result(output: str) -> tuple[bool, str, str]:
     """Returns (ok, rustdesk_id, message) from a script output."""
     output = output or ""
@@ -237,7 +277,7 @@ def parse_result(output: str) -> tuple[bool, str, str]:
         remote_id = m.group(1).strip()
     err = re.search(r"TRMMRA-ERR:(.*)", output)
     if err:
-        return False, remote_id, err.group(1).strip()[:1000]
+        return False, remote_id, decode_ascii(err.group(1).strip())[:1000]
     if "TRMMRA-OK" in output and remote_id:
         return True, remote_id, "ok"
     return False, remote_id, (output.strip()[-1000:] or "no output from the agent")
